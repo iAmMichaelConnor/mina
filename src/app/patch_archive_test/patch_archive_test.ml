@@ -16,6 +16,10 @@ open Async
 open Signature_lib
    open Archive_lib *)
 
+let archive_blocks_prog = "archive_blocks.exe"
+
+let missing_subchain_prog = "missing_subchain.exe"
+
 let db_from_uri uri =
   let path = Uri.path uri in
   String.sub path ~pos:1 ~len:(String.length path - 1)
@@ -32,8 +36,15 @@ let query_db pool ~f ~item =
       failwithf "Error running query for %s from db, error: %s" item
         (Caqti_error.show msg) ()
 
-let main ~archive_uri ~num_blocks_to_patch ~precomputed:_ ~extensional:_
-    ~files:_ () =
+let main ~archive_uri ~num_blocks_to_patch ~precomputed ~extensional ~files ()
+    =
+  let () =
+    match (precomputed, extensional) with
+    | true, false | false, true ->
+        ()
+    | _ ->
+        failwith "Exactly one of -precomputed and -extensional must be true"
+  in
   let logger = Logger.create () in
   let archive_uri = Uri.of_string archive_uri in
   let copy_uri = make_archive_copy_uri archive_uri in
@@ -60,7 +71,8 @@ let main ~archive_uri ~num_blocks_to_patch ~precomputed:_ ~extensional:_
               return ()
           | Error msg ->
               [%log info]
-                "Dropping copied database resulted in error (probably OK): %s"
+                "Dropping copied database resulted in error (probably it \
+                 didn't exist): %s"
                 (Caqti_error.show msg) ;
               return ()
         in
@@ -120,6 +132,16 @@ let main ~archive_uri ~num_blocks_to_patch ~precomputed:_ ~extensional:_
               ~f:(fun db -> Sql.Block.run_delete db ~state_hash)
               ~item:"state hash of block to delete" )
       in
+      (* patch the copy with precomputed or extensional blocks, using the archive_blocks tool *)
+      [%log info] "Patching the copy with supplied blocks" ;
+      let block_kind =
+        if precomputed then "-precomputed" else "-extensional"
+      in
+      let args =
+        ["--archive-uri"; Uri.to_string copy_uri; block_kind] @ files
+      in
+      let%bind _ = Process.run_lines_exn ~prog:archive_blocks_prog ~args () in
+      (* run missing subchain tool to dump extensional blocks from original and copy *)
       Deferred.unit
 
 let () =
