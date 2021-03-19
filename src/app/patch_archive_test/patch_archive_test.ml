@@ -18,7 +18,7 @@ open Signature_lib
 
 let archive_blocks_prog = "archive_blocks.exe"
 
-let missing_subchain_prog = "missing_subchain.exe"
+let extract_blocks_prog = "extract_blocks.exe"
 
 let db_from_uri uri =
   let path = Uri.path uri in
@@ -35,6 +35,62 @@ let query_db pool ~f ~item =
   | Error msg ->
       failwithf "Error running query for %s from db, error: %s" item
         (Caqti_error.show msg) ()
+
+let extract_blocks ~uri ~working_dir =
+  let args = ["--archive-uri"; Uri.to_string uri; "--all-blocks"] in
+  ignore
+    (Process.run_lines_exn ~working_dir ~prog:extract_blocks_prog ~args ())
+
+let compare_blocks ~logger ~original_blocks_dir ~copy_blocks_dir =
+  let blocks_in_dir dir =
+    let%map blocks_array = Async.Sys.readdir dir in
+    String.Set.of_array blocks_array
+  in
+  let diff_list s1 s2 = String.Set.diff s1 s2 |> String.Set.to_list in
+  let get_block fn =
+    In_channel.with_file fn ~f:(fun in_channel ->
+        let json = Yojson.Safe.from_channel in_channel in
+        match Archive_lib.Extensional.Block.of_yojson json with
+        | Ok block ->
+            block
+        | Error err ->
+            failwithf "Could not parse extensional block in file %s, error: %s"
+              fn err () )
+  in
+  let%bind original_blocks = blocks_in_dir original_blocks_dir in
+  let%bind copy_blocks = blocks_in_dir copy_blocks_dir in
+  if not (String.Set.equal original_blocks copy_blocks) then (
+    [%log error]
+      "After patching, original and copied databases contain different blocks" ;
+    let original_diff = diff_list original_blocks copy_blocks in
+    [%log error] "Original database contains these blocks not in the copy"
+      ~metadata:
+        [("blocks", `List (List.map original_diff ~f:(fun s -> `String s)))] ;
+    let copy_diff = diff_list copy_blocks original_blocks in
+    [%log error] "Copied database contains these blocks not in the original"
+      ~metadata:[("blocks", `List (List.map copy_diff ~f:(fun s -> `String s)))] ;
+    Core_kernel.exit 1 ) ;
+  [%log error]
+    "After patching, original and copied databases contain the same set of \
+     blocks" ;
+  (* same set of blocks, see if the blocks are equal *)
+  let found_difference =
+    List.fold original_blocks ~init:false ~f:(fun acc block_file ->
+        let original_block = get_block (original_blocks_dir ^/ block_file) in
+        let copied_block = get_block (copy_blocks_dir ^/ block_file) in
+        if
+          not (Archive_lib.Extensional.Block.equal original_block copied_block)
+        then (
+          [%log error] "Original, copied blocks differ in file %s" block_file ;
+          true )
+        else acc )
+  in
+  if found_difference then (
+    [%log fatal]
+      "The contents of one or more blocks differs between the original and \
+       copied databases" ;
+    Core.exit 1 ) ;
+  Deferred.unit
 
 let main ~archive_uri ~num_blocks_to_patch ~precomputed ~extensional ~files ()
     =
@@ -141,7 +197,20 @@ let main ~archive_uri ~num_blocks_to_patch ~precomputed ~extensional ~files ()
         ["--archive-uri"; Uri.to_string copy_uri; block_kind] @ files
       in
       let%bind _ = Process.run_lines_exn ~prog:archive_blocks_prog ~args () in
-      (* run missing subchain tool to dump extensional blocks from original and copy *)
+      (* extract extensional blocks from original and copy *)
+      [%log info]
+        "Extract extensional blocks from the original and copied databases" ;
+      let original_blocks_dir =
+        Core.Filename.temp_dir ~in_dir:Filename.temp_dir_name
+          "mina_archive_blocks" ".original"
+      in
+      let copy_blocks_dir =
+        Core.Filename.temp_dir ~in_dir:Filename.temp_dir_name
+          "mina_archive_blocks" ".copy"
+      in
+      extract_blocks ~uri:archive_uri ~working_dir:original_blocks_dir ;
+      extract_blocks ~uri:copy_uri ~working_dir:copy_blocks_dir ;
+      compare_blocks ~logger ~original_blocks_dir ~copy_blocks_dir ;
       Deferred.unit
 
 let () =
