@@ -12,14 +12,6 @@
 open Core_kernel
 open Async
 
-(* open Mina_base
-open Signature_lib
-   open Archive_lib *)
-
-let archive_blocks_prog = "archive_blocks.exe"
-
-let extract_blocks_prog = "extract_blocks.exe"
-
 let db_from_uri uri =
   let path = Uri.path uri in
   String.sub path ~pos:1 ~len:(String.length path - 1)
@@ -36,10 +28,10 @@ let query_db pool ~f ~item =
       failwithf "Error running query for %s from db, error: %s" item
         (Caqti_error.show msg) ()
 
-let extract_blocks ~uri ~working_dir =
+let extract_blocks ~uri ~working_dir ~extract_blocks_path =
   let args = ["--archive-uri"; Uri.to_string uri; "--all-blocks"] in
   ignore
-    (Process.run_lines_exn ~working_dir ~prog:extract_blocks_prog ~args ())
+    (Process.run_lines_exn ~working_dir ~prog:extract_blocks_path ~args ())
 
 let compare_blocks ~logger ~original_blocks_dir ~copy_blocks_dir =
   let blocks_in_dir dir =
@@ -75,7 +67,8 @@ let compare_blocks ~logger ~original_blocks_dir ~copy_blocks_dir =
      blocks" ;
   (* same set of blocks, see if the blocks are equal *)
   let found_difference =
-    List.fold original_blocks ~init:false ~f:(fun acc block_file ->
+    let open Core in
+    String.Set.fold original_blocks ~init:false ~f:(fun acc block_file ->
         let original_block = get_block (original_blocks_dir ^/ block_file) in
         let copied_block = get_block (copy_blocks_dir ^/ block_file) in
         if
@@ -92,8 +85,8 @@ let compare_blocks ~logger ~original_blocks_dir ~copy_blocks_dir =
     Core.exit 1 ) ;
   Deferred.unit
 
-let main ~archive_uri ~num_blocks_to_patch ~precomputed ~extensional ~files ()
-    =
+let main ~archive_uri ~num_blocks_to_patch ~archive_blocks_path
+    ~extract_blocks_path ~precomputed ~extensional ~files () =
   let () =
     match (precomputed, extensional) with
     | true, false | false, true ->
@@ -196,7 +189,7 @@ let main ~archive_uri ~num_blocks_to_patch ~precomputed ~extensional ~files ()
       let args =
         ["--archive-uri"; Uri.to_string copy_uri; block_kind] @ files
       in
-      let%bind _ = Process.run_lines_exn ~prog:archive_blocks_prog ~args () in
+      let%bind _ = Process.run_lines_exn ~prog:archive_blocks_path ~args () in
       (* extract extensional blocks from original and copy *)
       [%log info]
         "Extract extensional blocks from the original and copied databases" ;
@@ -208,10 +201,11 @@ let main ~archive_uri ~num_blocks_to_patch ~precomputed ~extensional ~files ()
         Core.Filename.temp_dir ~in_dir:Filename.temp_dir_name
           "mina_archive_blocks" ".copy"
       in
-      extract_blocks ~uri:archive_uri ~working_dir:original_blocks_dir ;
-      extract_blocks ~uri:copy_uri ~working_dir:copy_blocks_dir ;
-      compare_blocks ~logger ~original_blocks_dir ~copy_blocks_dir ;
-      Deferred.unit
+      extract_blocks ~uri:archive_uri ~working_dir:original_blocks_dir
+        ~extract_blocks_path ;
+      extract_blocks ~uri:copy_uri ~working_dir:copy_blocks_dir
+        ~extract_blocks_path ;
+      compare_blocks ~logger ~original_blocks_dir ~copy_blocks_dir
 
 let () =
   Command.(
@@ -229,6 +223,16 @@ let () =
              flag "--num-blocks-to-patch" ~aliases:["num-blocks-to-patch"]
                Param.(required int))
              ~doc:"Number of blocks to remove and patch"
+         and archive_blocks_path =
+           Param.(
+             flag "--archive-blocks-path" ~aliases:["archive-blocks-path"]
+               Param.(required string))
+             ~doc:"Path to archive_blocks executable"
+         and extract_blocks_path =
+           Param.(
+             flag "--extract-blocks-path" ~aliases:["extract-blocks-path"]
+               Param.(required string))
+             ~doc:"Path to extract_blocks executable"
          and precomputed =
            Param.(flag "--precomputed" ~aliases:["precomputed"] no_arg)
              ~doc:"Blocks are in precomputed format"
@@ -236,5 +240,5 @@ let () =
            Param.(flag "--extensional" ~aliases:["extensional"] no_arg)
              ~doc:"Blocks are in extensional format"
          and files = Param.anon Anons.(sequence ("FILES" %: Param.string)) in
-         main ~archive_uri ~num_blocks_to_patch ~precomputed ~extensional
-           ~files)))
+         main ~archive_uri ~num_blocks_to_patch ~archive_blocks_path
+           ~extract_blocks_path ~precomputed ~extensional ~files)))
